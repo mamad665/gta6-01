@@ -1,0 +1,1 @@
+{"description":"Solmar City — an open-world crime game built for make.fun's Make GTA 6 bounty.","name":"solmar-city","private":true,"scripts":{"dossier":"MAKEFUN_OUTPUT_DIR=out node main.ts"},"type":"module","version":"1.0.0"}
