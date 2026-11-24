@@ -1,67 +1,89 @@
-// Solmar City — dossier builder. Run: MAKEFUN_OUTPUT_DIR=out node main.ts
-// Writes dossier.json describing the game for the make.fun entry.
-import { readdirSync, readFileSync, statSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+// Solmar City — entry packager for the make.fun "Make GTA 6" bounty (gta6-01).
+//
+// What this program does, in order:
+//   1. Stages a clean copy of the playable game (game/) and its screenshots
+//      (screenshots/) into the hand-in directory.
+//   2. Asks the vendored make.fun library to build the dossier from that staged
+//      copy, so the dossier the judge reads describes exactly what was handed in.
+//   3. Prints a short summary of the staged entry so a bad stage is obvious
+//      before anything is submitted.
+//
+// The hand-in directory is MAKEFUN_OUTPUT_DIR when set (the scorer's sandbox
+// runs with /output); otherwise it defaults to /output. Run it locally with:
+//   MAKEFUN_OUTPUT_DIR=out node main.ts
+//
+// Node 22+ only, standard library only — no build step, no install.
+
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildDossier } from './vendor/makefun-game.ts';
 
-const root = dirname(fileURLToPath(import.meta.url));
-const outDir = process.env.MAKEFUN_OUTPUT_DIR || join(root, 'out');
-
-function listFiles(dir, base = '') {
-  const out = [];
-  for (const name of readdirSync(dir)) {
-    const p = join(dir, name);
-    const rel = base ? `${base}/${name}` : name;
-    const st = statSync(p);
-    if (st.isDirectory()) out.push(...listFiles(p, rel));
-    else out.push({ path: rel, bytes: st.size, lines: readFileSync(p, 'utf8').split('\n').length });
-  }
-  return out;
-}
-
-const gameDir = join(root, 'game');
-const files = listFiles(gameDir);
-const totalLines = files.reduce((s, f) => s + f.lines, 0);
-const totalBytes = files.reduce((s, f) => s + f.bytes, 0);
-
-const shotDir = join(root, 'screenshots');
-const shots = [];
-if (existsSync(shotDir)) {
-  for (const name of readdirSync(shotDir).sort()) {
-    if (!/\.(jpg|jpeg|png)$/i.test(name)) continue;
-    const buf = readFileSync(join(shotDir, name));
-    const ext = name.toLowerCase().endsWith('.png') ? 'png' : 'jpeg';
-    shots.push({ name, bytes: buf.length, data: `data:image/${ext};base64,${buf.toString('base64')}` });
-  }
-}
-
-const dossier = {
-  title: 'Solmar City — Open-World Crime',
-  competition: 'gta6-01',
-  description: 'A top-down 2D open-world crime game set in the fictional coastal city of Solmar. Play Marco Vale, a wheelman working four chained jobs for Rosa Delgado: run packages, steal a Comet GT, make a quiet drop, and intercept a bank van — while the Solmar PD hunts you down with a wanted-star system.',
-  howToPlay: 'WASD to move and drive, E to enter or steal a car, F to punch, G or click to shoot, P to pause, M to mute. Follow the gold star marker to complete each job. Watch your health and wanted stars.',
-  features: [
-    'Open world: road grid city with buildings, park, beach, pier, docks and 8 named landmarks',
-    'Drive and steal cars (E), traffic AI that follows roads, pedestrians that flee gunfire',
-    'Wanted-star system with police chase AI, ramming, and BUSTED arrests',
-    'Four chained story missions for Rosa Delgado with payouts $500 / $800 / $1,200 / $2,500',
-    'Combat: punching and pistol with ammo, muzzle tracers, hit reactions',
-    'HUD with cash, health, wanted stars, live minimap, objective tracker and toasts',
-    'Title, pause, BUSTED, WASTED and story-end screens; save/load via localStorage',
-    'Synthesized WebAudio SFX: gunshots, siren, pickup chimes, mission jingles',
-  ],
-  tech: 'Vanilla ES modules, no libraries, no network, canvas 2D rendering at 1280x720.',
-  files,
-  stats: { totalFiles: files.length, totalLines, totalBytes, screenshots: shots.length },
-  screenshots: shots,
-  entrypoint: 'game/index.html',
+// The competition's own caps, as the scorer's gate states them. The text cap is
+// the only one that shapes the dossier's bytes; the rest make this program
+// refuse an entry the scorer would refuse, instead of handing in a bad one.
+const GATE = {
+  text_max_bytes: 163840,
+  screenshots: { max: 4, max_bytes: 262144 },
+  game_max_files: 993,
+  game_max_bytes: 50331648,
+  game_path_max_bytes: 1000,
 };
 
-mkdirSync(outDir, { recursive: true });
-writeFileSync(join(outDir, 'dossier.json'), JSON.stringify(dossier, null, 2));
-const size = statSync(join(outDir, 'dossier.json')).size;
-console.log(`dossier.json: ${size} bytes, ${files.length} files, ${totalLines} lines, ${shots.length} screenshots`);
-if (size > 1572864) {
-  console.error('ERROR: dossier exceeds the 1.5 MiB cap');
-  process.exit(1);
+const repoRoot = fileURLToPath(new URL('.', import.meta.url));
+const handIn = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+
+/** Files and directories below `dir`, counted the way the platform counts them. */
+function tally(dir) {
+  let entries = 0;
+  let bytes = 0;
+  for (const name of readdirSync(dir)) {
+    const p = join(dir, name);
+    const st = statSync(p);
+    entries += 1;
+    if (st.isDirectory()) {
+      const sub = tally(p);
+      entries += sub.entries;
+      bytes += sub.bytes;
+    } else {
+      bytes += st.size;
+    }
+  }
+  return { entries, bytes };
 }
+
+/** Stage one source tree into the hand-in dir, replacing any stale copy. */
+function stageTree(source, dest) {
+  rmSync(dest, { recursive: true, force: true });
+  mkdirSync(dest, { recursive: true });
+  if (existsSync(source)) cpSync(source, dest, { recursive: true });
+}
+
+mkdirSync(handIn, { recursive: true });
+stageTree(join(repoRoot, 'game'), join(handIn, 'game'));
+stageTree(join(repoRoot, 'screenshots'), join(handIn, 'screenshots'));
+
+// How many screenshots the staged copy holds: the dossier must carry them all.
+const shotsExpected = readdirSync(join(handIn, 'screenshots')).filter((n) => /\.(png|jpe?g)$/i.test(n)).length;
+
+// Build the dossier from the staged copy, not from the repo, so the judge's
+// rebuild from the same staged files produces the same bytes.
+const dossier = buildDossier(handIn, GATE);
+writeFileSync(join(handIn, 'dossier.json'), dossier);
+
+// Read the dossier back and check what was actually written, so a truncated
+// or corrupt write is caught here instead of by the scorer.
+const written = JSON.parse(readFileSync(join(handIn, 'dossier.json'), 'utf8'));
+if (written.schema !== 'makefun/dossier/v1') throw new Error(`dossier.json: unexpected schema ${written.schema}`);
+if (!Array.isArray(written.images) || written.images.length !== shotsExpected) {
+  throw new Error(`dossier.json: holds ${written.images?.length ?? 0} images, expected ${shotsExpected}`);
+}
+
+const game = tally(join(handIn, 'game'));
+const shots = readdirSync(join(handIn, 'screenshots'))
+  .filter((n) => /\.(png|jpe?g)$/i.test(n))
+  .sort()
+  .map((n) => `${n} (${statSync(join(handIn, 'screenshots', n)).size} bytes)`);
+console.log(`staged ${game.entries} game entries (${game.bytes} bytes) and ${shots.length} screenshots into ${handIn}`);
+console.log(`screenshots: ${shots.join(', ')}`);
+console.log(`dossier.json: ${dossier.length} bytes, schema ${written.schema}, ${written.images.length} images, text ${Buffer.byteLength(written.text, 'utf8')} bytes`);
